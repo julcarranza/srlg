@@ -1,0 +1,264 @@
+/* * ---------------------------------------------------------------------
+#  *  Author        : Julio Carranza
+#  *  Version       : 1.1 - Add comments and cost value to each path 
+#  *  Version       : 1.2 - Add arguments to show Ingress, Transit or both 
+#  *                        type of LSPs; and to show complete SRLG info of
+#  *                        a path
+#  *  Version       : 1.3 - If the SRLG is present in more than one link in 
+#  *                        primary path it is counted only once in the 
+#  *                        bypass path
+#  *  
+#  *  Last Modified : 2015-Jan-15
+#  *  Script Type   : op
+#  *  Description   : show-srlg-info shows SRLG information for RSVP LSPs 
+#  *  using bypass paths for protection. LSPs without bypass paths are 
+#  *  ignored. It assumes ISIS as IGP. Cost of the path is used adding up
+#  *  metric cost for each link
+#  *  
+#  *  License       : BSD-Style
+#  *  Copyright (c) 2010 Julio Carranza. All Rights Reserved.
+#  *  Redistribution and use in source and binary forms, with or without
+#  *  modification, are permitted provided that the following conditions
+#  *  are met: 1. Redistributions of source code must retain the above
+#  *  copyright notice, this list of conditions and the following
+#  *  disclaimer.  2. Redistributions in binary form must reproduce the
+#  *  above copyright notice, this list of conditions and the following
+#  *  disclaimer in the documentation and/or other materials provided
+#  *  with the distribution.  3. The name of the author may not be used
+#  *  to endorse or promote products derived from this software without
+#  *  specific prior written permission.  THIS SOFTWARE IS PROVIDED BY
+#  *  THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+#  *  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+#  *  DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+#  *  INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+#  *  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+#  *  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+#  *  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+#  *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+#  *  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# */
+ 
+version 1.0;
+ 
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns exsl extension = "http://exslt.org/common";
+ns func extension = "http://exslt.org/functions";
+ns srlg extension = "http://xml.juniper.net/srlg";
+ 
+import "../import/junos.xsl";
+
+var $arguments = {
+        <argument> {
+                <name> 'lsp-type';
+                <description> "By default shows only Ingress LSPs, 't' shows only Transit LSPs, and 'b' shows both Ingress and Transit LSPs.";
+        }                               
+        <argument> {
+                <name> 'raw';
+                <description> 'By default shows only groups shared with standby path, "1" shows complete SRLG information.';
+        }
+}
+ 
+param $lsp-type;
+param $raw;
+
+    /* Store get-rsvp-information output in $session to find the ERO */  
+    var $cmd1 = <get-rsvp-session-information> {
+        <extensive>;
+    }
+    var $session = jcs:execute($jnx, $cmd1 );
+
+    /* Store get-ted-database-information output in $ted to fing SRLG, metrics,
+		router name */  
+    var $cmd2 = <get-ted-database-information> {
+        <extensive>;
+    }
+    var $ted = jcs:execute($jnx, $cmd2 );
+	/* Store get-mpls-srlg-information output in $srlg to find the ERO */	
+	var $cmd3 = <get-mpls-srlg-information>;
+    var $srlg = jcs:execute($jnx, $cmd3 );
+	
+var $jnx = jcs:open();
+
+match / {                               
+	
+	var $show-type := {
+        if( $lsp-type == "b" ) {
+            <types> 'Ingress';
+			<types> 'Transit';
+        }
+        else if ( $lsp-type == "t" ) {
+		    <types> 'Transit';
+        }
+        else {
+            <types> 'Ingress';
+        }			
+    }
+
+	/* Obtain SRLG info for LSPs */ 
+	for-each ($show-type/types) {
+	    var $type = .;
+        expr jcs:output( ., " LSPs");
+        expr jcs:output( "LSPname/Standby - Path [ SRLG ] * Cost ");
+        expr jcs:output( "-");  
+		for-each ($session/rsvp-session-data[ session-type = $type]/rsvp-session/bypass-name) {
+            var $path =  ../name;
+  		    var $spath = .;
+            var $pp_srlg = srlg:srlgpath($path);
+	        var $sp_srlg = srlg:srlgpath($spath);
+            /* Execute get-srlg-path template for the LSP */
+		
+            call get-srlg-path($path, $sp_srlg);
+            /* Execute get-srlg-spath template for the bypath associated to the LSP */
+			
+            call get-srlg-spath($spath, $pp_srlg );
+            expr jcs:output( "-");
+        }
+    }
+
+    expr jcs:close( $jnx );
+}
+
+template get-srlg-path($path, $sp_srlg) {
+    mvar $line = srlg:briefoutput( $path, $sp_srlg);
+    if ( $raw == 1 ) {
+		set $line = srlg:rawoutput( $path); 
+	}
+
+	/* Calculate the cost for the LSP, adding up the link's metric */
+    var $metric-data := {
+	    for-each ($session/rsvp-session-data/rsvp-session[name = $path]/explicit-route/address) {
+		    var $address = .;
+			/* It  obtains the metric for the link*/
+			var $cost = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-metric;
+            <data> $cost;
+        }
+    }
+	
+	set $line = concat( $line,  " * Cost = ", sum( $metric-data/data ) );
+	expr jcs:output( $line ); 
+
+}
+
+template get-srlg-spath($spath, $pp_srlg ) {
+    mvar $sline = srlg:briefoutput( $spath, $pp_srlg);
+    if ( $raw == 1 ) {
+		set $sline = srlg:rawoutput( $spath); 
+	}
+	
+	/* Calculate the cost for the LSP, adding up the link's metric */
+
+	var $metric-data := {
+	    for-each ($session/rsvp-session-data/rsvp-session[name = $spath]/explicit-route/address) {
+		    var $address = .;
+			/* It  obtains the metric for the link*/
+			mvar $srlgcost = 0;
+			for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+			    var $srlg-n = .;
+				mvar $nodiverse = 0;
+                for-each ( $pp_srlg/group ) {
+			        if ( . ==  $srlg-n ) {
+					    set $nodiverse = 1;
+                        
+     				}
+					
+				}
+				if ( $nodiverse == 1) {
+				    set $srlgcost = $srlg/mpls-srlg[srlg-value = $srlg-n]/srlg-cost;
+					<data> $srlgcost;
+				}
+			}
+			
+			if ( $srlgcost == 0 ) {
+			    set $srlgcost = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-metric;
+                <data> $srlgcost;
+			}
+        }
+    }
+
+	set $sline = concat( $sline,  " * Cost = ", sum( $metric-data/data ) );
+    expr jcs:output( $sline );
+	
+}
+
+
+
+<func:function name="srlg:srlgpath"> {
+/* Store the SRLG path in a XML elements */
+    param $pathname;
+	var $srlgpath := {
+        for-each( $session/rsvp-session-data/rsvp-session[name = $pathname]/explicit-route/address) {
+		    var $address0 =.;
+		    for-each ($ted/ted-database/ted-link[ted-link-local-address = $address0]/ted-link-srlg/srlg-name) {      
+                <group> .;
+		    }	
+        }
+    }
+    <func:result select="$srlgpath">;	
+}
+
+<func:function name="srlg:rawoutput"> {
+/* Writes an detailed output for a path */
+    param $pathname;
+	mvar $rawline = concat($pathname, " - "); 
+	/* It obtains for each address in the ERO its address [ name and SRLG] */
+        for-each ($session/rsvp-session-data/rsvp-session[name = $pathname]/explicit-route/address) {
+				/* It gets address */
+                set $rawline = concat( $rawline, ., "[ ");   
+                var $address = .;
+				/* It gets router name */
+                for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]) {
+                        var $node-id =jcs:split("(.00)", ../ted-database-id);
+                        set $rawline = concat( $rawline,  $node-id[1], " ");
+                }       
+                /* It gets all the SRLG associated to the link */        
+                for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+                        set $rawline = concat( $rawline, ., " ");     
+                } 
+                if (!$ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+                        set $rawline = concat( $rawline, "no_info "); 
+                }
+				
+                set $rawline = concat( $rawline,  "] ");      
+        }
+    <func:result select="$rawline">;	
+}
+
+<func:function name="srlg:briefoutput"> {
+/* Writes only SRLG for no diverse links */
+    param $pathname;
+	param $p_info;
+	mvar $briefline = concat($pathname, " - "); 
+
+		for-each ($session/rsvp-session-data/rsvp-session[name = $pathname]/explicit-route/address) {
+				/* It gets address */
+                set $briefline = concat( $briefline, ., " ");   
+                var $address = .;
+				/* It gets router name */
+                for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]) {
+                    var $node-id =jcs:split("(.00)", ../ted-database-id);
+					set $briefline = concat( $briefline,  "[ ",  $node-id[1], " ");
+					for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+					    var $srlg-n = .;
+						mvar $nodiverse = 0;
+                        for-each ( $p_info/group ) {
+					        if ( . ==  $srlg-n ) {
+							    set $nodiverse = 1;
+								  
+							}
+						}
+						if ( $nodiverse == 1) {
+					       set $briefline = concat( $briefline, ., " ");
+					    }
+					}
+					set $briefline = concat( $briefline, "] ");  
+                }       
+    
+ 
+        }
+	
+    <func:result select="$briefline">;	
+}
