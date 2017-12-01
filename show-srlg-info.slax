@@ -9,8 +9,13 @@
 #  *                        bypass path
 #  *  Version       : 1.4 - Prints all LSPs even when their bypass path is
 #  *                        down
+#  *  Version       : 1.5 - Introduce the argument 'lspname' to specify
+#  *                        the name of the LSP. Added support of asymmetric
+#  *                        metrics
+#  *                  2017-02-20
 #  *
-#  *  Last Modified : 2015-Dec-29
+#  *
+#  *  Create        : 2015-Dec-29
 #  *  Script Type   : op
 #  *  Description   : show-srlg-info shows SRLG info for UP RSVP LSPs
 #  *  and router names for the ERO. LSPs without bypass says 'no bypass
@@ -42,18 +47,18 @@
 #  *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 #  *  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # */
- 
+
 version 1.0;
- 
+
 ns junos = "http://xml.juniper.net/junos/*/junos";
 ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
 ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
 ns exsl extension = "http://exslt.org/common";
 ns func extension = "http://exslt.org/functions";
 ns srlg extension = "http://xml.juniper.net/srlg";
- 
+
 import "../import/junos.xsl";
- 
+
 var $arguments = {
         <argument> {
                 <name> 'lsp-type';
@@ -63,17 +68,22 @@ var $arguments = {
                 <name> 'raw';
                 <description> 'By default shows only groups shared with standby path, "1" shows complete SRLG information.';
         }
+        <argument> {
+                <name> 'lspname';
+                <description> 'Specify the nameof the LSP, if not state is present output is blank';
+        }
 }
- 
+
 param $lsp-type;
-param $raw;                             
- 
+param $raw;
+param $lspname;
+
     /* Store get-rsvp-information output in $session to find the ERO */
     var $cmd1 = <get-rsvp-session-information> {
         <extensive>;
     }
     var $session = jcs:execute($jnx, $cmd1 );
- 
+
     /* Store get-ted-database-information output in $ted to fing SRLG, metrics,
                 router name */
     var $cmd2 = <get-ted-database-information> {
@@ -83,13 +93,13 @@ param $raw;
         /* Store get-mpls-srlg-information output in $srlg to find the ERO */
         var $cmd3 = <get-mpls-srlg-information>;
     var $srlg = jcs:execute($jnx, $cmd3 );
- 
+
 var $jnx = jcs:open();
- 
+
 match / {
- 
+
     var $show-type := {
-        if( $lsp-type == "b" ) {        
+        if( $lsp-type == "b" ) {
             <types> 'Ingress';
                         <types> 'Transit';
         }
@@ -100,117 +110,147 @@ match / {
             <types> 'Ingress';
         }
     }
- 
+
     /* Obtain SRLG info for LSPs */
     for-each ($show-type/types) {
             var $type = .;
         expr jcs:output( ., " LSPs");
         expr jcs:output( "LSPname/Standby - Path [ SRLG ] * Cost ");
         expr jcs:output( "-");
-        for-each ($session/rsvp-session-data[ session-type = $type]/rsvp-session/is-nodeprotection) {
-            var $path =  ../name;
+
+
+        if ($lspname) {
+            var $path =  $lspname;
             var $pp_srlg = srlg:srlgpath($path);
-            if (../bypass-name) {
-             
-                var $spath = ../bypass-name;
-                var $sp_srlg = srlg:srlgpath($spath);
-                /* Execute get-srlg-path template for the LSP */
-                call get-srlg-path($path, $sp_srlg);
-                /* Execute get-srlg-spath template for the bypath associated to the LSP */
-                call get-srlg-spath($spath, $pp_srlg );
-                expr jcs:output( "-");
+            if ($session/rsvp-session-data[ session-type = $type]/rsvp-session[name = $path ]/bypass-name) {
+                    var $spath = $session/rsvp-session-data[ session-type = $type]/rsvp-session[name = $path ]/bypass-name;
+                    var $sp_srlg = srlg:srlgpath($spath);
+                    /* Execute get-srlg-path template for the LSP */
+                    call get-srlg-path($path, $sp_srlg);
+                    /* Execute get-srlg-spath template for the bypath associated to the LSP */
+                    call get-srlg-spath($spath, $pp_srlg );
+                    expr jcs:output( "-");
             }
             else {
                 /* Execute get-srlg-path template for the LSP */
                 var $sp_srlg := <group> '0';
-                call get-srlg-path($path, $sp_srlg);
+                call get-srlg-path($lspname, $sp_srlg);
                 expr jcs:output( "No bypass path");
                 expr jcs:output( "-");
             }
+        }
+        else {
+            for-each ($session/rsvp-session-data[ session-type = $type]/rsvp-session/is-nodeprotection) {
+                var $path =  ../name;
+                var $pp_srlg = srlg:srlgpath($path);
+                if (../bypass-name) {
 
+                    var $spath = ../bypass-name;
+                    var $sp_srlg = srlg:srlgpath($spath);
+                    /* Execute get-srlg-path template for the LSP */
+                    call get-srlg-path($path, $sp_srlg);
+                    /* Execute get-srlg-spath template for the bypath associated to the LSP */
+                    call get-srlg-spath($spath, $pp_srlg );
+                    expr jcs:output( "-");
+                }
+                else {
+                    /* Execute get-srlg-path template for the LSP */
+                    var $sp_srlg := <group> '0';
+                    call get-srlg-path($path, $sp_srlg);
+                    expr jcs:output( "No bypass path");
+                    expr jcs:output( "-");
+                }
+
+            }
         }
     }
  expr jcs:close( $jnx );
 }
- 
+
 template get-srlg-path($path, $sp_srlg) {
     mvar $line = srlg:briefoutput( $path, $sp_srlg);
     if ( $raw == 1 ) {
         set $line = srlg:rawoutput( $path);
     }
- 
+
     /* Calculate the cost for the LSP, adding up the link's metric */
     var $metric-data := {
     for-each ($session/rsvp-session-data/rsvp-session[name = $path]/explicit-route/address) {
         var $address = .;
         /* It  obtains the metric for the link*/
-        var $cost = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-metric;
+        var $remote-address = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-remote-address;
+        var $cost = $ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-metric;
            <data> $cost;
         }
     }
- 
+
     set $line = concat( $line,  " * Cost = ", sum( $metric-data/data ) );
     expr jcs:output( $line );
- 
+
 }
- 
+
 template get-srlg-spath($spath, $pp_srlg ) {
     mvar $sline = srlg:briefoutput( $spath, $pp_srlg);
     if ( $raw == 1 ) {
                 set $sline = srlg:rawoutput( $spath);
         }
- 
+
         /* Calculate the cost for the LSP, adding up the link's metric */
- 
+
         var $metric-data := {
             for-each ($session/rsvp-session-data/rsvp-session[name = $spath]/explicit-route/address) {
                     var $address = .;
+                    var $remote-address = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-remote-address;
+
                         /* It  obtains the metric for the link*/
                         mvar $srlgcost = 0;
-                        for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+                        for-each ($ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-srlg/srlg-name) {
                             var $srlg-n = .;
                                 mvar $nodiverse = 0;
                 for-each ( $pp_srlg/group ) {
                                 if ( . ==  $srlg-n ) {
                                             set $nodiverse = 1;
- 
+
                                 }
- 
+
                                 }
                                 if ( $nodiverse == 1) {
                                     set $srlgcost = $srlg/mpls-srlg[srlg-value = $srlg-n]/srlg-cost;
                                         <data> $srlgcost;
                                 }
                         }
- 
+
                         if ( $srlgcost == 0 ) {
-                            set $srlgcost = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-metric;
+                            set $srlgcost = $ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-metric;
                 <data> $srlgcost;
                         }
         }
     }
- 
+
     set $sline = concat( $sline,  " * Cost = ", sum( $metric-data/data ) );
     expr jcs:output( $sline );
- 
+
 }
- 
- 
- 
+
+
+
 <func:function name="srlg:srlgpath"> {
 /* Store the SRLG path in a XML elements */
-    param $pathname;                    
+    param $pathname;
         var $srlgpath := {
+
         for-each( $session/rsvp-session-data/rsvp-session[name = $pathname]/explicit-route/address) {
                     var $address0 =.;
-                    for-each ($ted/ted-database/ted-link[ted-link-local-address = $address0]/ted-link-srlg/srlg-name) {
+                    var $remote-address0 = $ted/ted-database/ted-link[ted-link-local-address = $address0]/ted-link-remote-address;
+                    for-each ($ted/ted-database/ted-link[ted-link-local-address = $remote-address0]/ted-link-srlg/srlg-name) {
                 <group> .;
                     }
+            }
         }
-    }
+
     <func:result select="$srlgpath">;
 }
- 
+
 <func:function name="srlg:rawoutput"> {
 /* Writes an detailed output for a path */
     param $pathname;
@@ -220,24 +260,26 @@ template get-srlg-spath($spath, $pp_srlg ) {
                                 /* It gets address */
                 set $rawline = concat( $rawline, ., "[ ");
                 var $address = .;
+                var $remote-address = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-remote-address;
                                 /* It gets router name */
+
                 for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]) {
                         var $node-id =jcs:split("(.00)", ../ted-database-id);
                         set $rawline = concat( $rawline,  $node-id[1], " ");
                 }
                 /* It gets all the SRLG associated to the link */
-                for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+                for-each ($ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-srlg/srlg-name) {
                         set $rawline = concat( $rawline, ., " ");
                 }
-                if (!$ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+                if (!$ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-srlg/srlg-name) {
                         set $rawline = concat( $rawline, "no_info ");
                 }
- 
+
                 set $rawline = concat( $rawline,  "] ");
         }
     <func:result select="$rawline">;
 }
- 
+
 <func:function name="srlg:briefoutput"> {
     /* Writes only SRLG for no diverse links */
     param $pathname;
@@ -247,14 +289,15 @@ template get-srlg-spath($spath, $pp_srlg ) {
         /* It gets address */
         set $briefline = concat( $briefline, ., " ");
         var $address = .;
+        var $remote-address = $ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-remote-address;
         /* It gets router name */
         for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]) {
             var $node-id =jcs:split("(.00)", ../ted-database-id);
             set $briefline = concat( $briefline,  "[ ",  $node-id[1], " ");
-            for-each ($ted/ted-database/ted-link[ted-link-local-address = $address]/ted-link-srlg/srlg-name) {
+            for-each ($ted/ted-database/ted-link[ted-link-local-address = $remote-address]/ted-link-srlg/srlg-name) {
                 var $srlg-n = .;
                 mvar $nodiverse = 0;
-   
+
                 for-each ( $p_info/group ) {
                     if ( . ==  $srlg-n ) {
                          set $nodiverse = 1;
